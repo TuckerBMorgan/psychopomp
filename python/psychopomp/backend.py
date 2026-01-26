@@ -38,6 +38,7 @@ def psychopomp(
             input_names=[f"input_{i}" for i in range(len(example_inputs))],
             dynamic_axes=None,
             opset_version=17,
+            # dynamo=True, // For now dyanmo is off so that the older exported is used
         )
 
         # Process through Rust

@@ -5,6 +5,70 @@ import torch
 from torch import nn
 
 
+class BasicTransformerLM(nn.Module):
+    """
+    Minimal encoder-style Transformer for language-model-ish next-token logits.
+    Input:  (B, T) token ids
+    Output: (B, T, vocab_size) logits
+    """
+
+    def __init__(
+        self,
+        vocab_size: int,
+        d_model: int = 256,
+        nhead: int = 8,
+        num_layers: int = 4,
+        dim_feedforward: int = 1024,
+        max_len: int = 512,
+        dropout: float = 0.1,
+        pad_id: int = 0,
+    ):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.d_model = d_model
+        self.pad_id = pad_id
+
+        self.tok_emb = nn.Embedding(vocab_size, d_model, padding_idx=pad_id)
+        self.pos_emb = nn.Embedding(max_len, d_model)
+
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            batch_first=True,  # (B, T, C)
+            norm_first=True,  # pre-norm = a bit more stable
+            activation="gelu",
+        )
+        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=num_layers)
+        self.lm_head = nn.Linear(d_model, vocab_size)
+
+    def forward(self, x: torch.Tensor):
+        """
+        x: LongTensor (B, T)
+        """
+        B, T = x.shape
+        device = x.device
+
+        pos = torch.arange(T, device=device).unsqueeze(0).expand(B, T)  # (B, T)
+        h = self.tok_emb(x) + self.pos_emb(pos)  # (B, T, C)
+
+        # Padding mask: True where tokens should be ignored
+        key_padding_mask = x == self.pad_id  # (B, T)
+
+        # Causal mask so each position can't see the future (LM-style)
+        # True/inf above diagonal => disallow attention
+        causal_mask = torch.triu(torch.ones(T, T, device=device), diagonal=1).bool()
+
+        h = self.encoder(
+            h,
+            mask=causal_mask,
+            src_key_padding_mask=key_padding_mask,
+        )
+        logits = self.lm_head(h)  # (B, T, vocab)
+        return logits
+
+
 class SimpleModel(nn.Module):
     def __init__(self):
         super().__init__()
@@ -371,6 +435,22 @@ def test_multi_layer_mlp():
     check("test_multi_layer_mlp", result, expected, tol=5e-3)
 
 
+def test_simple_transfomer():
+    """Test Simple transformer."""
+    print("=== Test: Simple Transformer ===")
+    vocab_size = 10_000
+    model = BasicTransformerLM(
+        vocab_size=vocab_size, d_model=128, nhead=4, num_layers=2, max_len=256
+    )
+    model.eval()
+    x = torch.randint(0, vocab_size, (2, 32))  # (batch=2, seq=32)
+    compiled = torch.compile(model, backend="psychopomp")
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_simple_transformer", result, expected, tol=1e-5)
+
+
 def main():
     tests = [
         test_simple_linear,
@@ -386,6 +466,7 @@ def main():
         test_residual_block,
         test_matmul_transpose_attention,
         test_multi_layer_mlp,
+        test_simple_transfomer,
     ]
 
     passed = 0

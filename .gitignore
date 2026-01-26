@@ -1,0 +1,12 @@
+# Rust build artifacts
+/target/
+**/target/
+
+# Cargo lock file (uncomment if this is a library)
+# Cargo.lock
+
+# Backup files
+**/*.rs.bk
+
+# Debug files (Windows)
+*.pdb

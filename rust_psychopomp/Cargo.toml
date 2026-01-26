@@ -1,0 +1,15 @@
+[package]
+name = "rust_psychopomp"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "_psychopomp_rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+luminal = {git = "https://github.com/TuckerBMorgan/luminal.git"}
+#luminal_cuda = {git = "https://github.com/TuckerBMorgan/luminal.git"}
+pyo3 = {version = "0.23", features = ["extension-module"]}
+onnx-protobuf = "0.2"
+protobuf = "~3.4"

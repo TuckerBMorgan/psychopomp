@@ -691,6 +691,23 @@ pub fn parse_constant(
                     .collect()
             }
         }
+        9 => {
+            // Bool
+            // Bools are stored as bytes in raw_data or as int32 in int32_data
+            if !tensor_proto.int32_data.is_empty() {
+                tensor_proto
+                    .int32_data
+                    .iter()
+                    .map(|&v| if v != 0 { 1.0 } else { 0.0 })
+                    .collect()
+            } else {
+                tensor_proto
+                    .raw_data
+                    .iter()
+                    .map(|&b| if b != 0 { 1.0 } else { 0.0 })
+                    .collect()
+            }
+        }
         11 => {
             // FLOAT64 (f64)
             // There is a cast from f64 -> f32 here because Luminal does not support f32
@@ -1009,10 +1026,11 @@ pub fn parse_where_node(
 ///
 /// The target shape is read from the second input (must be a known constant).
 /// Only dimensions of size 1 in the input are expanded to match the target.
+/// Propagates known_values by broadcasting the input values to the output shape.
 pub fn parse_expand_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
-    known_values: &HashMap<String, Vec<f32>>,
+    known_values: &mut HashMap<String, Vec<f32>>,
 ) -> Result<(), String> {
     assert!(node.input.len() == 2, "Expand should have 2 inputs");
     let input = *tensors
@@ -1038,10 +1056,25 @@ pub fn parse_expand_node(
         .collect();
 
     let mut result = input;
-    result.shape.expand(broadcast_shape);
+    result.shape.expand(broadcast_shape.clone());
 
     let output_name = &node.output[0];
     tensors.insert(output_name.clone(), result);
+
+    // Propagate known values by broadcasting to the output shape
+    if let Some(input_vals) = known_values.get(&node.input[0]).cloned() {
+        let output_size: usize = broadcast_shape.iter().product();
+        let expanded = if input_vals.len() == 1 {
+            // Scalar broadcast: replicate the single value
+            vec![input_vals[0]; output_size]
+        } else {
+            // General broadcast: tile the input values
+            // For simplicity, only handle the common case where input is broadcastable
+            input_vals.iter().cycle().take(output_size).cloned().collect()
+        };
+        known_values.insert(output_name.clone(), expanded);
+    }
+
     Ok(())
 }
 

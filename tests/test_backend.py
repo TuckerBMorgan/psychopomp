@@ -4,6 +4,7 @@ import os
 
 import psychopomp
 import torch
+from nanogpt import *
 from torch import nn
 
 # Backend selection via environment variable
@@ -34,7 +35,7 @@ class BasicTransformerLM(nn.Module):
         self.d_model = d_model
         self.pad_id = pad_id
 
-        self.tok_emb = nn.Embedding(vocab_size, d_model, padding_idx=pad_id)
+        self.tok_emb = nn.Embedding(vocab_size, d_model)
         self.pos_emb = nn.Embedding(max_len, d_model)
 
         enc_layer = nn.TransformerEncoderLayer(
@@ -58,7 +59,7 @@ class BasicTransformerLM(nn.Module):
 
         pos = torch.arange(T, device=device).unsqueeze(0).expand(B, T)  # (B, T)
         h = self.tok_emb(x) + self.pos_emb(pos)  # (B, T, C)
-
+        return h
         # Padding mask: True where tokens should be ignored
         key_padding_mask = x == self.pad_id  # (B, T)
 
@@ -775,12 +776,49 @@ def test_cast():
     check("test_cast", result, expected, tol=1e-5)
 
 
+def test_nanogpt():
+    """Test Nanogpt."""
+    print("=== Test: NanoGpt ===")
+    config = GPTConfig()
+    model = GPT(config)
+    model.eval()  # Put in eval mode
+
+    batch_size = 1
+    seq_length = 128  # Start with smaller sequence for export
+
+    x = torch.randint(
+        0, model.config.vocab_size, (batch_size, seq_length), dtype=torch.long
+    )
+    print(f"  Input shape: {x.shape}, dtype: {x.dtype}")
+
+    print("  Compiling model...")
+    compiled = torch.compile(model, backend=BACKEND)
+
+    print("  Running compiled model...")
+    result = compiled(x)
+
+    print("  Running PyTorch model...")
+    with torch.no_grad():
+        expected = model(x)
+    print(f"  PyTorch result type: {type(expected)}")
+
+    # Handle tuple outputs (nanogpt returns (logits, loss))
+    if isinstance(result, tuple) and isinstance(expected, tuple):
+        # Compare only the logits (first element), loss is None during inference
+        result = result[0]
+        expected = expected[0]
+        print(f"  Comparing first element of tuples...")
+
+    check("test_nanogpt", result, expected, tol=1e-5)
+
+
 def main():
     print(f"Running tests with backend: {BACKEND}")
     print("=" * 50)
     print()
 
     tests = [
+        test_nanogpt,
         test_simple_linear,
         test_elementwise_mul_div,
         test_sqrt_div_model,

@@ -27,15 +27,25 @@ class CompiledModel:
             if kn_name in all_tensor_names:
                 self._kn_inputs[name] = kn_name
 
-    def __call__(self, *inputs: torch.Tensor) -> List[torch.Tensor]:
+    def __call__(self, *inputs: torch.Tensor, verbose: bool = False) -> List[torch.Tensor]:
         """Execute the compiled model with PyTorch tensor inputs.
 
         Args:
             *inputs: PyTorch tensors matching the model's input signature
+            verbose: If True, print debug information
 
         Returns:
             List of PyTorch tensors containing the model outputs
         """
+        import os
+        verbose = verbose or os.environ.get('PSYCHOPOMP_VERBOSE', '0') == '1'
+
+        if verbose:
+            print(f"  [CompiledModel] Input names: {self._input_names}")
+            print(f"  [CompiledModel] Output names: {self._output_names}")
+            print(f"  [CompiledModel] Output shapes: {self._output_shapes}")
+            print(f"  [CompiledModel] Received {len(inputs)} inputs")
+
         if len(inputs) != len(self._input_names):
             raise ValueError(
                 f"Expected {len(self._input_names)} inputs, got {len(inputs)}"
@@ -43,6 +53,8 @@ class CompiledModel:
 
         # Set input data
         for name, tensor in zip(self._input_names, inputs):
+            if verbose:
+                print(f"  [CompiledModel] Setting input '{name}': shape={tensor.shape}, dtype={tensor.dtype}")
             # Convert to contiguous float32 numpy array
             arr = tensor.detach().contiguous().float().numpy()
             data = arr.flatten().tolist()
@@ -55,16 +67,29 @@ class CompiledModel:
                 if arr.ndim == 2:
                     transposed = arr.T.flatten().tolist()
                     self._graph.set_input(kn_name, transposed)
+                    if verbose:
+                        print(f"  [CompiledModel] Setting transposed input '{kn_name}'")
 
         # Run the graph
+        if verbose:
+            print(f"  [CompiledModel] Running graph...")
         self._graph.run()
 
         # Get outputs and convert back to PyTorch tensors
         outputs = []
         for name, shape in zip(self._output_names, self._output_shapes):
+            if verbose:
+                print(f"  [CompiledModel] Getting output '{name}' with shape {shape}")
             data = self._graph.get_output(name)
+            if verbose:
+                print(f"  [CompiledModel] Got {len(data)} values for '{name}'")
             tensor = torch.tensor(data, dtype=torch.float32).reshape(tuple(shape))
             outputs.append(tensor)
+            if verbose:
+                print(f"  [CompiledModel] Output '{name}': shape={tensor.shape}")
+
+        if verbose:
+            print(f"  [CompiledModel] Returning tuple of {len(outputs)} outputs")
 
         # Return as a tuple (TorchDynamo expects tuple return from backend callables)
         return tuple(outputs)

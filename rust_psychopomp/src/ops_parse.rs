@@ -2103,7 +2103,10 @@ pub fn parse_trilu_node(
         } else {
             cx.tril(rows, k)
         };
-        let result = input.mul(mask);
+        // Broadcast mask to match input dimensions (handles batched inputs)
+        let broadcast_shape = compute_broadcast_shape(&input.dims(), &mask.dims());
+        let mask_bc = broadcast_to(mask, &broadcast_shape);
+        let result = input.mul(mask_bc);
         tensors.insert(output_name.clone(), result);
     }
 

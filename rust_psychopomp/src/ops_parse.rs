@@ -1250,10 +1250,13 @@ pub fn parse_gather_node(
             let pre_size: usize = data_shape[..axis].iter().product::<usize>().max(1);
             let post_size: usize = data_shape[axis + 1..].iter().product::<usize>().max(1);
             let indices_size: usize = vidx.len();
+            let axis_dim = data_shape[axis] as i64;
 
             for pre in 0..pre_size {
                 for (idx_pos, &idx_val) in vidx.iter().enumerate() {
-                    let idx = idx_val as usize;
+                    // Normalize negative indices: ONNX allows -1 for last element, etc.
+                    let idx_raw = idx_val as i64;
+                    let idx = (((idx_raw % axis_dim) + axis_dim) % axis_dim) as usize;
                     for post in 0..post_size {
                         let data_flat =
                             pre * (data_shape[axis] * post_size) + idx * post_size + post;
@@ -1276,9 +1279,21 @@ pub fn parse_gather_node(
         return Ok(());
     }
 
-    let indices = *tensors
+    let indices_raw = *tensors
         .get(&node.input[1])
         .ok_or_else(|| format!("Gather: missing indices tensor '{}'", node.input[1]))?;
+
+    // Normalize negative indices: ONNX allows -1 for last element, -2 for second-to-last, etc.
+    // Use conditional normalization instead of modulo to avoid floating-point precision loss:
+    // if index < 0 then index + axis_dim else index
+    let axis_dim = data_dims[axis]
+        .to_usize()
+        .ok_or_else(|| "Gather: axis dimension must be concrete for index normalization".to_string())?;
+    let axis_dim_f32 = axis_dim as f32;
+    let zero = indices_raw.graph().constant_float(0.0).expand_rhs(indices_raw.shape);
+    let adjustment = indices_raw.graph().constant_float(axis_dim_f32).expand_rhs(indices_raw.shape);
+    let is_negative = indices_raw.lt(zero); // Returns 1.0 for negative, 0.0 for non-negative
+    let indices = indices_raw + (is_negative * adjustment);
 
     let result = if data_ndim == 1 {
         // 1D data: simple flat element-wise gather
@@ -1357,19 +1372,25 @@ fn gather_axis0(
         .product();
 
     // Compute flat_indices = indices * inner_dim + offsets
-    let scaled = indices * (inner_dim as f32);
+    // IMPORTANT: Use Int arithmetic to avoid f32 precision loss for large indices.
+    // f32 only has 24-bit mantissa, so indices > 16.7M lose precision.
+    // For vocab_size=50304, embed_dim=768: max flat index = 38.6M
+    let indices_int = indices.cast(DType::Int);
+    let inner_dim_tensor = indices.graph().constant(inner_dim as i32).expand_rhs(indices_int.shape);
+    let scaled = indices_int * inner_dim_tensor;
     let idx_ndim = indices.dims().len();
     let scaled_expanded = scaled.expand_dim(idx_ndim, inner_dim);
 
     // Create column offsets [0, 1, ..., inner_dim-1] and broadcast to indices shape
-    let offsets = data.graph().arange(inner_dim).cast(DType::F32);
+    // Keep as Int for precise arithmetic
+    let offsets = data.graph().arange(inner_dim); // arange returns Int
     let idx_dims = indices.dims();
     let mut offsets_expanded = offsets;
     for i in (0..idx_dims.len()).rev() {
         offsets_expanded = offsets_expanded.expand_dim(0, idx_dims[i].clone());
     }
 
-    let flat_indices = (scaled_expanded + offsets_expanded).cast(DType::Int);
+    let flat_indices = scaled_expanded + offsets_expanded; // Both Int, result is Int
 
     // Gather using flat indices into contiguous data buffer
     let gathered = data.gather(flat_indices);

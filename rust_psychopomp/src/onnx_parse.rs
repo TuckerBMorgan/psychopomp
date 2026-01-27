@@ -1,4 +1,5 @@
 use crate::ops_parse::*;
+use crate::runtime::initialize_runtime;
 use crate::utils::*;
 use luminal::prelude::GraphTensor;
 use luminal::prelude::*;
@@ -7,19 +8,18 @@ use onnx_protobuf::NodeProto;
 use protobuf::Message;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::hash::Hash;
 use std::path::Path;
 
 use crate::common_types::OnnxGraphResult;
 
-pub fn build_onnx_graph(path: &str) -> Result<OnnxGraphResult, String> {
+pub fn build_onnx_graph(path: &str, backend: &str) -> Result<OnnxGraphResult, String> {
     let data = fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;
     let model_directory = Path::new(path).parent().unwrap_or(Path::new("."));
     // TODO: this loads the entire model into memory, need to look into having this mmapeds
     let model = ModelProto::parse_from_bytes(&data)
         .map_err(|e| format!("Failed to parse Onnx Model: {}", e))?;
 
-    return OnnxGraphResult::parse_model(model, model_directory);
+    return OnnxGraphResult::parse_model(model, model_directory, backend);
 }
 
 /// Process all nodes in the ONNX graph, dispatching each to its parse function.
@@ -79,6 +79,7 @@ impl OnnxGraphResult {
     pub fn parse_model(
         model: ModelProto,
         model_directory: &Path,
+        backend: &str,
     ) -> Result<OnnxGraphResult, String> {
         let onnx_graph = &model.graph;
 
@@ -248,13 +249,10 @@ impl OnnxGraphResult {
         // Track which tensor names are Input nodes (includes those created during process_onnx_nodes)
         let input_tensor_names: HashSet<String> = tensors.keys().cloned().collect();
 
-        // Build and optimize with CudaRuntime.
-        // CudaRuntime's profile() actually executes the graph during search,
+        // Build and optimize with the selected runtime (native or cuda).
+        // For CudaRuntime, profile() executes the graph during search,
         // so ALL Input nodes must have buffers before cx.search().
-        //        let ctx = CudaContext::new(0).map_err(|e| format!("Failed to init CUDA context: {}", e))?;
-        //  let stream = ctx.default_stream();
-        context.build_search_space::<NativeRuntime>();
-        let mut rt = context.search(NativeRuntime::default(), 1);
+        let mut rt = initialize_runtime(&mut context, backend)?;
 
         // Step 1: Set dummy zero data for ALL input tensors
         for (name, gt) in &tensors {
@@ -301,8 +299,6 @@ impl OnnxGraphResult {
                 rt.set_data(gt.id, floats.clone());
             }
         }
-
-        context.build_search_space::<NativeRuntime>();
 
         Ok(OnnxGraphResult {
             context,

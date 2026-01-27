@@ -3,10 +3,12 @@ use std::collections::HashMap;
 use luminal::prelude::*;
 use pyo3::prelude::*;
 
+use crate::runtime::RuntimeBackend;
+
 #[pyclass(unsendable)]
 pub struct OnnxGraphResult {
     pub context: Graph,
-    pub runtime: NativeRuntime,
+    pub runtime: RuntimeBackend,
     pub tensor_ids: HashMap<String, NodeIndex>,
     pub input_names: Vec<String>,
     pub output_names: Vec<String>,
@@ -39,6 +41,12 @@ impl OnnxGraphResult {
         self.tensor_ids.keys().cloned().collect()
     }
 
+    /// Get the name of the active backend (native or cuda).
+    #[getter]
+    fn backend(&self) -> &'static str {
+        self.runtime.name()
+    }
+
     /// Set input tensor data by name.
     fn set_input(&mut self, name: &str, data: Vec<f32>) -> PyResult<()> {
         let node_id = self
@@ -60,7 +68,6 @@ impl OnnxGraphResult {
             .tensor_ids
             .get(name)
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("Unknown output tensor: {}", name)))?;
-        let data = self.runtime.get_f32(*node_id);
-        Ok(data.to_vec())
+        Ok(self.runtime.get_f32(*node_id))
     }
 }

@@ -258,6 +258,165 @@ class MultiLayerMLP(nn.Module):
         return self.fc3(x)
 
 
+# --- New ONNX Op Test Models ---
+
+
+class TanhModel(nn.Module):
+    """Tanh activation applied to linear output."""
+
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features)
+
+    def forward(self, x):
+        return torch.tanh(self.linear(x))
+
+
+class SplitEqualModel(nn.Module):
+    """Split tensor into equal parts along feature dimension."""
+
+    def __init__(self, in_features, num_splits):
+        super().__init__()
+        self.num_splits = num_splits
+        self.linear = nn.Linear(in_features, in_features)
+
+    def forward(self, x):
+        x = self.linear(x)
+        splits = torch.split(x, x.shape[-1] // self.num_splits, dim=-1)
+        return splits[0] + splits[1]
+
+
+class SplitUnequalModel(nn.Module):
+    """Split tensor into unequal parts."""
+
+    def __init__(self, in_features):
+        super().__init__()
+        self.linear = nn.Linear(in_features, in_features)
+
+    def forward(self, x):
+        x = self.linear(x)
+        # Split into [4, 8, 4] for 16 features
+        splits = torch.split(x, [4, 8, 4], dim=-1)
+        return splits[1]  # Return middle chunk
+
+
+class GatherEmbeddingModel(nn.Module):
+    """Gather elements using indices (embedding lookup pattern)."""
+
+    def __init__(self, num_embeddings, embedding_dim):
+        super().__init__()
+        self.embedding = nn.Embedding(num_embeddings, embedding_dim)
+
+    def forward(self, indices):
+        return self.embedding(indices)
+
+
+class ExpandBroadcastModel(nn.Module):
+    """Expand tensor via broadcasting addition."""
+
+    def __init__(self, features):
+        super().__init__()
+        self.bias = nn.Parameter(torch.randn(1, features))
+
+    def forward(self, x):
+        # x: (batch, seq, features), bias: (1, features)
+        # This triggers Expand to broadcast bias
+        return x + self.bias
+
+
+class ReshapeViewModel(nn.Module):
+    """Reshape tensor to different dimensions via view."""
+
+    def __init__(self, in_features, hidden):
+        super().__init__()
+        self.hidden = hidden
+        self.linear = nn.Linear(in_features, hidden * 4)
+
+    def forward(self, x):
+        batch = x.shape[0]
+        x = self.linear(x)
+        return x.view(batch, 4, self.hidden)
+
+
+class ReshapeFlattenModel(nn.Module):
+    """Flatten tensor dimensions using view."""
+
+    def __init__(self, seq_len, features):
+        super().__init__()
+        self.seq_len = seq_len
+        self.features = features
+        self.linear = nn.Linear(features, features)
+
+    def forward(self, x):
+        # x: (batch, seq, features) -> (batch, seq * features)
+        batch = x.shape[0]
+        x = self.linear(x)
+        return x.view(batch, self.seq_len * self.features)
+
+
+class UnsqueezeModel(nn.Module):
+    """Add dimension via unsqueeze."""
+
+    def __init__(self, features):
+        super().__init__()
+        self.linear = nn.Linear(features, features)
+
+    def forward(self, x):
+        x = self.linear(x)
+        # (batch, features) -> (batch, 1, features)
+        return x.unsqueeze(1)
+
+
+class SqueezeModel(nn.Module):
+    """Remove dimension via squeeze."""
+
+    def __init__(self, features):
+        super().__init__()
+        self.linear = nn.Linear(features, features)
+
+    def forward(self, x):
+        x = self.linear(x)
+        # (batch, 1, features) -> (batch, features)
+        return x.squeeze(1)
+
+
+
+
+class EqualModel(nn.Module):
+    """Equality comparison."""
+
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("target", torch.tensor([0.0]))
+
+    def forward(self, x):
+        return (x == self.target).float()
+
+
+class ModModel(nn.Module):
+    """Element-wise modulo operation."""
+
+    def __init__(self, divisor):
+        super().__init__()
+        self.register_buffer("divisor", torch.tensor([float(divisor)]))
+
+    def forward(self, x):
+        return torch.fmod(x, self.divisor)
+
+
+class CastModel(nn.Module):
+    """Type casting operations (float -> int -> float)."""
+
+    def __init__(self, features):
+        super().__init__()
+        self.linear = nn.Linear(features, features)
+
+    def forward(self, x):
+        x = self.linear(x)
+        x_int = x.int()
+        return x_int.float()
+
+
 def check(name, result, expected, tol):
     """Compare result vs expected and assert within tolerance."""
     diff = (result - expected).abs().max().item()
@@ -457,6 +616,165 @@ def test_simple_transfomer():
     check("test_simple_transformer", result, expected, tol=1e-5)
 
 
+# --- New ONNX Op Tests ---
+
+
+def test_tanh_standalone():
+    """Test torch.tanh activation."""
+    print("=== Test: Tanh ===")
+    model = TanhModel(in_features=16, out_features=8)
+    model.eval()
+    x = torch.randn(4, 16)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_tanh_standalone", result, expected, tol=1e-4)
+
+
+def test_split_equal():
+    """Test Split with equal division."""
+    print("=== Test: Split (Equal) ===")
+    model = SplitEqualModel(in_features=16, num_splits=4)
+    model.eval()
+    x = torch.randn(4, 16)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_split_equal", result, expected, tol=1e-5)
+
+
+def test_split_unequal():
+    """Test Split with unequal split sizes."""
+    print("=== Test: Split (Unequal) ===")
+    model = SplitUnequalModel(in_features=16)
+    model.eval()
+    x = torch.randn(4, 16)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_split_unequal", result, expected, tol=1e-5)
+
+
+def test_gather_embedding():
+    """Test Gather via embedding lookup (axis=0)."""
+    print("=== Test: Gather (Embedding) ===")
+    model = GatherEmbeddingModel(num_embeddings=100, embedding_dim=32)
+    model.eval()
+    indices = torch.randint(0, 100, (4, 8))
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(indices)
+    with torch.no_grad():
+        expected = model(indices)
+    check("test_gather_embedding", result, expected, tol=1e-5)
+
+
+def test_expand_broadcast():
+    """Test Expand via broadcasting."""
+    print("=== Test: Expand (Broadcast) ===")
+    model = ExpandBroadcastModel(features=32)
+    model.eval()
+    x = torch.randn(4, 8, 32)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_expand_broadcast", result, expected, tol=1e-5)
+
+
+def test_reshape_view():
+    """Test Reshape via view operation."""
+    print("=== Test: Reshape (View) ===")
+    model = ReshapeViewModel(in_features=16, hidden=8)
+    model.eval()
+    x = torch.randn(4, 16)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_reshape_view", result, expected, tol=1e-5)
+
+
+def test_reshape_flatten():
+    """Test Reshape via view to flatten."""
+    print("=== Test: Reshape (Flatten) ===")
+    model = ReshapeFlattenModel(seq_len=8, features=16)
+    model.eval()
+    x = torch.randn(4, 8, 16)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_reshape_flatten", result, expected, tol=1e-5)
+
+
+def test_unsqueeze():
+    """Test Unsqueeze dimension insertion."""
+    print("=== Test: Unsqueeze ===")
+    model = UnsqueezeModel(features=16)
+    model.eval()
+    x = torch.randn(4, 16)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_unsqueeze", result, expected, tol=1e-5)
+
+
+def test_squeeze():
+    """Test Squeeze dimension removal."""
+    print("=== Test: Squeeze ===")
+    model = SqueezeModel(features=16)
+    model.eval()
+    x = torch.randn(4, 1, 16)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_squeeze", result, expected, tol=1e-5)
+
+
+def test_equal():
+    """Test Equal comparison."""
+    print("=== Test: Equal ===")
+    model = EqualModel()
+    model.eval()
+    x = torch.tensor([[0.0, 1.0, 0.0, 2.0], [0.0, 0.0, 3.0, 0.0]])
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_equal", result, expected, tol=1e-5)
+
+
+def test_mod():
+    """Test Mod element-wise modulo."""
+    print("=== Test: Mod ===")
+    model = ModModel(divisor=3.0)
+    model.eval()
+    x = torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]])
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_mod", result, expected, tol=1e-5)
+
+
+def test_cast():
+    """Test Cast type conversion."""
+    print("=== Test: Cast ===")
+    model = CastModel(features=16)
+    model.eval()
+    x = torch.randn(4, 16)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_cast", result, expected, tol=1e-5)
+
+
 def main():
     print(f"Running tests with backend: {BACKEND}")
     print("=" * 50)
@@ -477,6 +795,19 @@ def main():
         test_matmul_transpose_attention,
         test_multi_layer_mlp,
         test_simple_transfomer,
+        # New ONNX op tests
+        test_tanh_standalone,
+        test_split_equal,
+        test_split_unequal,
+        test_gather_embedding,
+        test_expand_broadcast,
+        test_reshape_view,
+        test_reshape_flatten,
+        test_unsqueeze,
+        test_squeeze,
+        test_equal,
+        test_mod,
+        test_cast,
     ]
 
     passed = 0

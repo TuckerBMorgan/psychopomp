@@ -41,6 +41,7 @@ fn process_onnx_nodes(
             "Mul" => parse_mul_node(node, tensors, cx, weight_data, known_values)?,
             "Div" => parse_div_node(node, tensors, cx, weight_data, known_values)?,
             "Sqrt" => parse_sqrt_node(node, tensors, known_values)?,
+            "Tanh" => parse_tanh_node(node, tensors, cx, weight_data, known_values)?,
             "Softmax" => parse_softmax_node(node, tensors, cx, weight_data)?,
             "Erf" => parse_erf_node(node, tensors, cx, weight_data)?,
             "Gelu" => parse_gelu_node(node, tensors, cx, weight_data)?,
@@ -49,7 +50,6 @@ fn process_onnx_nodes(
             "ConstantOfShape" => {
                 parse_constant_of_shape(node, tensors, cx, weight_data, known_values)?
             }
-
             "Identity" => parse_identity(node, tensors, known_values)?,
             "Dropout" => parse_dropout_node(node, tensors, known_values)?,
             "Equal" => parse_equal_node(node, tensors, known_values)?,
@@ -58,7 +58,6 @@ fn process_onnx_nodes(
             "Gather" => parse_gather_node(node, tensors, cx, weight_data, known_values)?,
             "Trilu" => parse_trilu_node(node, tensors, cx, weight_data, known_values)?,
             "Cast" => parse_cast_node(node, tensors, known_values)?,
-
             "Transpose" => parse_transpose_node(node, tensors)?,
             "MatMul" => parse_matmul_node(node, tensors)?,
             "Mod" => parse_mod_node(node, tensors, known_values)?,
@@ -68,7 +67,7 @@ fn process_onnx_nodes(
             "Concat" => parse_concat_node(node, tensors, cx, weight_data, known_values)?,
             "Unsqueeze" => parse_unsqueeze_node(node, tensors, known_values)?,
             "Squeeze" => parse_squeeze_node(node, tensors, known_values)?,
-
+            "Split" => parse_split_node(node, tensors, cx, weight_data, known_values)?,
             other => return Err(format!("Unsupported ONNX op type: {:?}", other)),
         }
     }

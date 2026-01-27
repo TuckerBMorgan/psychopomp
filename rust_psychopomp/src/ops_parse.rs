@@ -233,6 +233,91 @@ pub fn parse_sqrt_node(
     Ok(())
 }
 
+/// Handle Tanh node: compute hyperbolic tangent.
+/// tanh(x) = (1 - exp(-2x)) / (1 + exp(-2x))
+pub fn parse_tanh_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    cx: &mut Graph,
+    weight_data: &mut Vec<(String, Vec<f32>)>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    assert!(node.input.len() == 1, "Tanh should have exactly 1 input");
+    let input = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Tanh: missing input tensor '{}'", node.input[0]))?;
+
+    let output_name = &node.output[0];
+
+    // Constant fold if input is known
+    if let Some(vals) = known_values.get(&node.input[0]).cloned() {
+        let folded: Vec<f32> = vals.iter().map(|&v| v.tanh()).collect();
+        known_values.insert(output_name.clone(), folded.clone());
+
+        let input_shape: Vec<usize> = input.dims().iter().map(|e| e.to_usize().unwrap()).collect();
+        let tensor = cx.named_tensor(output_name.clone(), input_shape);
+        tensors.insert(output_name.clone(), tensor);
+        weight_data.push((output_name.clone(), folded));
+        return Ok(());
+    }
+
+    let input_shape: Vec<usize> = input.dims().iter().map(|e| e.to_usize().unwrap()).collect();
+
+    // tanh(x) = (1 - exp(-2x)) / (1 + exp(-2x))
+    // Using exp2: exp(z) = exp2(z * log2(e))
+
+    // -2.0 constant
+    let neg2_name = format!("{}_tanh_neg2", output_name);
+    let neg2 = cx.named_tensor(neg2_name.clone(), vec![1usize]);
+    tensors.insert(neg2_name.clone(), neg2);
+    weight_data.push((neg2_name, vec![-2.0f32]));
+    let neg2_bc = broadcast_to(neg2, &input_shape);
+
+    // log2(e) for exp2 conversion
+    let log2e_name = format!("{}_tanh_log2e", output_name);
+    let log2e = cx.named_tensor(log2e_name.clone(), vec![1usize]);
+    tensors.insert(log2e_name.clone(), log2e);
+    weight_data.push((log2e_name, vec![1.0f32 / 2.0f32.ln()]));
+    let log2e_bc = broadcast_to(log2e, &input_shape);
+
+    // 1.0 constant
+    let one_name = format!("{}_tanh_one", output_name);
+    let one = cx.named_tensor(one_name.clone(), vec![1usize]);
+    tensors.insert(one_name.clone(), one);
+    weight_data.push((one_name, vec![1.0f32]));
+    let one_bc = broadcast_to(one, &input_shape);
+
+    // -1.0 constant
+    let neg_one_name = format!("{}_tanh_neg_one", output_name);
+    let neg_one = cx.named_tensor(neg_one_name.clone(), vec![1usize]);
+    tensors.insert(neg_one_name.clone(), neg_one);
+    weight_data.push((neg_one_name, vec![-1.0f32]));
+    let neg_one_bc = broadcast_to(neg_one, &input_shape);
+
+    // Step 1: -2x
+    let neg2x = neg2_bc.mul(input);
+
+    // Step 2: -2x * log2(e) for exp2 conversion
+    let exp_arg = neg2x.mul(log2e_bc);
+
+    // Step 3: exp(-2x) = exp2(-2x * log2(e))
+    let exp_neg2x = exp_arg.exp2();
+
+    // Step 4: 1 + exp(-2x)
+    let one_plus_exp = one_bc.add(exp_neg2x);
+
+    // Step 5: 1 - exp(-2x) = 1 + (-1) * exp(-2x)
+    let neg_exp = neg_one_bc.mul(exp_neg2x);
+    let one_minus_exp = one_bc.add(neg_exp);
+
+    // Step 6: (1 - exp(-2x)) / (1 + exp(-2x)) = (1 - exp(-2x)) * recip(1 + exp(-2x))
+    let recip_denom = one_plus_exp.reciprocal();
+    let result = one_minus_exp.mul(recip_denom);
+
+    tensors.insert(output_name.clone(), result);
+    Ok(())
+}
+
 /// Handle Softmax node: compute softmax along the specified axis (default: last).
 ///
 /// Softmax(x)_i = exp(x_i) / sum(exp(x_j)) for all j along the axis.
@@ -1044,9 +1129,25 @@ pub fn parse_expand_node(
     let target_shape: Vec<usize> = shape_data.iter().map(|&v| v as usize).collect();
 
     // Compute broadcast output shape: max(input_dim, target_dim) per dimension.
-    // Only expand dims that are currently 1.
+    // Per ONNX spec, if input has fewer dims than target, it's right-aligned
+    // (leading dims are treated as 1).
     let input_dims = input.dims();
-    let broadcast_shape: Vec<usize> = input_dims
+    let input_rank = input_dims.len();
+    let target_rank = target_shape.len();
+
+    let mut result = input;
+
+    // If input has fewer dimensions, prepend dimensions of size 1
+    if input_rank < target_rank {
+        let dims_to_add = target_rank - input_rank;
+        for _ in 0..dims_to_add {
+            result = result.expand_dim(0, 1);
+        }
+    }
+
+    // Now compute broadcast shape with matching ranks
+    let padded_input_dims = result.dims();
+    let broadcast_shape: Vec<usize> = padded_input_dims
         .iter()
         .zip(target_shape.iter())
         .map(|(id, &td)| {
@@ -1055,7 +1156,6 @@ pub fn parse_expand_node(
         })
         .collect();
 
-    let mut result = input;
     result.shape.expand(broadcast_shape.clone());
 
     let output_name = &node.output[0];
@@ -1070,7 +1170,12 @@ pub fn parse_expand_node(
         } else {
             // General broadcast: tile the input values
             // For simplicity, only handle the common case where input is broadcastable
-            input_vals.iter().cycle().take(output_size).cloned().collect()
+            input_vals
+                .iter()
+                .cycle()
+                .take(output_size)
+                .cloned()
+                .collect()
         };
         known_values.insert(output_name.clone(), expanded);
     }
@@ -1078,10 +1183,10 @@ pub fn parse_expand_node(
     Ok(())
 }
 
-/// Handle Gather node: index into a tensor along axis 0.
+/// Handle Gather node: index into a tensor along a specified axis.
 ///
 /// For 1D data, performs simple element-wise gathering. For ND data, gathers
-/// entire slices along the first dimension (e.g., embedding lookup).
+/// slices along the specified axis. Supports arbitrary axis values.
 /// Supports constant folding when both data and indices are known.
 pub fn parse_gather_node(
     node: &NodeProto,
@@ -1092,8 +1197,20 @@ pub fn parse_gather_node(
 ) -> Result<(), String> {
     assert!(node.input.len() == 2, "Gather should have 2 inputs");
 
-    let axis = get_int_attr(node, "axis", 0);
-    assert!(axis == 0, "Gather: only axis=0 is currently supported");
+    let data = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Gather: missing data tensor '{}'", node.input[0]))?;
+
+    let data_dims = data.dims();
+    let data_ndim = data_dims.len();
+
+    // Handle axis (support negative indexing)
+    let axis_raw = get_int_attr(node, "axis", 0);
+    let axis = if axis_raw < 0 {
+        (data_ndim as i64 + axis_raw) as usize
+    } else {
+        axis_raw as usize
+    };
 
     // If both inputs are known, fully constant-fold
     if let (Some(vdata), Some(vidx)) = (
@@ -1101,8 +1218,57 @@ pub fn parse_gather_node(
         known_values.get(&node.input[1]).cloned(),
     ) {
         let output_name = &node.output[0];
-        let folded: Vec<f32> = vidx.iter().map(|&idx| vdata[idx as usize]).collect();
-        let shape = vec![folded.len().max(1)];
+
+        // Get concrete data dimensions
+        let data_shape: Vec<usize> = data_dims
+            .iter()
+            .map(|d| d.to_usize().expect("Gather: data dims must be concrete"))
+            .collect();
+
+        // Get indices tensor shape
+        let indices_tensor = tensors.get(&node.input[1]);
+        let indices_shape: Vec<usize> = if let Some(idx_tensor) = indices_tensor {
+            idx_tensor
+                .dims()
+                .iter()
+                .map(|d| d.to_usize().expect("Gather: indices dims must be concrete"))
+                .collect()
+        } else {
+            vec![vidx.len()]
+        };
+
+        // Compute output shape: data_shape[0..axis] + indices_shape + data_shape[axis+1..]
+        let mut output_shape: Vec<usize> = data_shape[..axis].to_vec();
+        output_shape.extend(&indices_shape);
+        output_shape.extend(&data_shape[axis + 1..]);
+
+        // Gather with arbitrary axis
+        let output_size: usize = output_shape.iter().product();
+        let mut folded = vec![0.0f32; output_size.max(1)];
+
+        if output_size > 0 {
+            let pre_size: usize = data_shape[..axis].iter().product::<usize>().max(1);
+            let post_size: usize = data_shape[axis + 1..].iter().product::<usize>().max(1);
+            let indices_size: usize = vidx.len();
+
+            for pre in 0..pre_size {
+                for (idx_pos, &idx_val) in vidx.iter().enumerate() {
+                    let idx = idx_val as usize;
+                    for post in 0..post_size {
+                        let data_flat =
+                            pre * (data_shape[axis] * post_size) + idx * post_size + post;
+                        let out_flat = pre * (indices_size * post_size) + idx_pos * post_size + post;
+                        folded[out_flat] = vdata[data_flat];
+                    }
+                }
+            }
+        }
+
+        let shape = if output_shape.is_empty() {
+            vec![1]
+        } else {
+            output_shape
+        };
         let tensor = cx.named_tensor(output_name.clone(), shape);
         tensors.insert(output_name.clone(), tensor);
         known_values.insert(output_name.clone(), folded.clone());
@@ -1110,69 +1276,119 @@ pub fn parse_gather_node(
         return Ok(());
     }
 
-    let data = *tensors
-        .get(&node.input[0])
-        .ok_or_else(|| format!("Gather: missing data tensor '{}'", node.input[0]))?;
     let indices = *tensors
         .get(&node.input[1])
         .ok_or_else(|| format!("Gather: missing indices tensor '{}'", node.input[1]))?;
 
-    let data_dims = data.dims();
-    let result = if data_dims.len() == 1 {
+    let result = if data_ndim == 1 {
         // 1D data: simple flat element-wise gather
         data.gather(indices.cast(DType::Int))
-    } else {
+    } else if axis == 0 {
         // ND data with axis=0: gather entire slices along first dimension
-        // For data [D0, D1, ..., Dk] and indices [I0, ..., Im] → output [I0, ..., Im, D1, ..., Dk]
-        let inner_dim: usize = data_dims[1..]
-            .iter()
-            .map(|d| {
-                d.to_usize()
-                    .ok_or_else(|| "Gather: inner dimensions must be concrete".to_string())
-            })
-            .collect::<Result<Vec<_>, _>>()?
-            .iter()
-            .product();
+        gather_axis0(data, indices, &data_dims)?
+    } else {
+        // General case: axis != 0
+        // Strategy: permute to bring axis to front, gather, permute back
 
-        // Compute flat_indices = indices * inner_dim + offsets
-        let scaled = indices * (inner_dim as f32);
-        let idx_ndim = indices.dims().len();
-        let scaled_expanded = scaled.expand_dim(idx_ndim, inner_dim);
+        // Build permutation to move axis to position 0
+        let mut perm: Vec<usize> = (0..data_ndim).collect();
+        perm.remove(axis);
+        perm.insert(0, axis);
 
-        // Create column offsets [0, 1, ..., inner_dim-1] and broadcast to indices shape
-        let offsets = data.graph().arange(inner_dim).cast(DType::F32);
+        // Permute data
+        let permuted_data = data.permute(perm);
+        let permuted_dims = permuted_data.dims();
+
+        // Gather on axis 0 of permuted data
+        let gathered = gather_axis0(permuted_data, indices, &permuted_dims)?;
+
+        // Compute gathered shape
         let idx_dims = indices.dims();
-        let mut offsets_expanded = offsets;
-        for i in (0..idx_dims.len()).rev() {
-            offsets_expanded = offsets_expanded.expand_dim(0, idx_dims[i].clone());
+        let mut gathered_shape: Vec<usize> = idx_dims
+            .iter()
+            .map(|d| d.to_usize().expect("Gather: index dims must be concrete"))
+            .collect();
+        for d in &permuted_dims[1..] {
+            gathered_shape.push(d.to_usize().expect("Gather: data dims must be concrete"));
+        }
+        let mut reshaped = gathered;
+        reshaped.shape = ShapeTracker::new(gathered_shape.clone());
+
+        // Build inverse permutation to restore original axis order
+        let indices_rank = idx_dims.len();
+        let mut inv_perm: Vec<usize> = Vec::with_capacity(reshaped.dims().len());
+
+        // Dimensions before original axis (they're after indices in gathered result)
+        for i in 0..axis {
+            inv_perm.push(indices_rank + i);
+        }
+        // The indices dimensions
+        for i in 0..indices_rank {
+            inv_perm.push(i);
+        }
+        // Dimensions after original axis
+        for i in axis..(data_ndim - 1) {
+            inv_perm.push(indices_rank + i);
         }
 
-        let flat_indices = (scaled_expanded + offsets_expanded).cast(DType::Int);
-
-        // Gather using flat indices into contiguous data buffer
-        let gathered = data.gather(flat_indices);
-
-        // Reshape from [..., inner_dim] to [..., D1, D2, ..., Dk]
-        if data_dims.len() > 2 {
-            let mut output_shape: Vec<usize> = idx_dims
-                .iter()
-                .map(|d| d.to_usize().expect("Gather: index dims must be concrete"))
-                .collect();
-            for d in &data_dims[1..] {
-                output_shape.push(d.to_usize().expect("Gather: data dims must be concrete"));
-            }
-            let mut reshaped = gathered;
-            reshaped.shape = ShapeTracker::new(output_shape);
-            reshaped
-        } else {
-            gathered
-        }
+        reshaped.permute(inv_perm)
     };
 
     let output_name = &node.output[0];
     tensors.insert(output_name.clone(), result);
 
     Ok(())
+}
+
+/// Helper function for gathering along axis 0
+fn gather_axis0(
+    data: GraphTensor,
+    indices: GraphTensor,
+    data_dims: &[Expression],
+) -> Result<GraphTensor, String> {
+    let inner_dim: usize = data_dims[1..]
+        .iter()
+        .map(|d| {
+            d.to_usize()
+                .ok_or_else(|| "Gather: inner dimensions must be concrete".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .product();
+
+    // Compute flat_indices = indices * inner_dim + offsets
+    let scaled = indices * (inner_dim as f32);
+    let idx_ndim = indices.dims().len();
+    let scaled_expanded = scaled.expand_dim(idx_ndim, inner_dim);
+
+    // Create column offsets [0, 1, ..., inner_dim-1] and broadcast to indices shape
+    let offsets = data.graph().arange(inner_dim).cast(DType::F32);
+    let idx_dims = indices.dims();
+    let mut offsets_expanded = offsets;
+    for i in (0..idx_dims.len()).rev() {
+        offsets_expanded = offsets_expanded.expand_dim(0, idx_dims[i].clone());
+    }
+
+    let flat_indices = (scaled_expanded + offsets_expanded).cast(DType::Int);
+
+    // Gather using flat indices into contiguous data buffer
+    let gathered = data.gather(flat_indices);
+
+    // Reshape from [..., inner_dim] to [..., D1, D2, ..., Dk]
+    if data_dims.len() > 2 {
+        let mut output_shape: Vec<usize> = idx_dims
+            .iter()
+            .map(|d| d.to_usize().expect("Gather: index dims must be concrete"))
+            .collect();
+        for d in &data_dims[1..] {
+            output_shape.push(d.to_usize().expect("Gather: data dims must be concrete"));
+        }
+        let mut reshaped = gathered;
+        reshaped.shape = ShapeTracker::new(output_shape);
+        Ok(reshaped)
+    } else {
+        Ok(gathered)
+    }
 }
 
 /// Handle Cast node: convert a tensor's data type.
@@ -1868,6 +2084,114 @@ pub fn parse_trilu_node(
         };
         let result = input.mul(mask);
         tensors.insert(output_name.clone(), result);
+    }
+
+    Ok(())
+}
+
+/// Handle Split node: split a tensor into multiple output tensors along an axis.
+/// Inputs: input, [split sizes]
+/// Attributes: axis (default 0), num_outputs (for equal division)
+/// Outputs: Multiple tensors, one for each split chunk
+pub fn parse_split_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    _cx: &mut Graph,
+    _weight_data: &mut Vec<(String, Vec<f32>)>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    assert!(
+        !node.input.is_empty(),
+        "Split should have at least 1 input"
+    );
+
+    let input = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Split: missing input tensor '{}'", node.input[0]))?;
+
+    // Get axis attribute (default 0, handle negative indices)
+    let axis = get_int_attr(node, "axis", 0);
+    let input_dims = input.dims();
+    let ndim = input_dims.len();
+    let resolved_axis = if axis < 0 {
+        (ndim as i64 + axis) as usize
+    } else {
+        axis as usize
+    };
+
+    // Get dimension size at split axis
+    let dim_size = input_dims[resolved_axis]
+        .to_usize()
+        .ok_or_else(|| "Split: dimension must be concrete".to_string())?;
+
+    // Determine split sizes
+    let split_sizes: Vec<usize> = if node.input.len() > 1 && !node.input[1].is_empty() {
+        // Split sizes from input tensor (must be known constant)
+        known_values
+            .get(&node.input[1])
+            .ok_or_else(|| format!("Split: split sizes '{}' must be known", node.input[1]))?
+            .iter()
+            .map(|&v| v as usize)
+            .collect()
+    } else {
+        // Use num_outputs attribute for equal division
+        let num_outputs = get_int_attr(node, "num_outputs", node.output.len() as i64) as usize;
+        let base_size = dim_size / num_outputs;
+        let remainder = dim_size % num_outputs;
+        // Last chunk may be smaller if not evenly divisible
+        (0..num_outputs)
+            .map(|i| {
+                if i == num_outputs - 1 {
+                    base_size + remainder
+                } else {
+                    base_size
+                }
+            })
+            .collect()
+    };
+
+    // Validate split sizes sum to dimension size
+    let total: usize = split_sizes.iter().sum();
+    if total != dim_size {
+        return Err(format!(
+            "Split: sum of split sizes ({}) != dimension size ({})",
+            total, dim_size
+        ));
+    }
+
+    // Create output tensors using slice operations
+    let mut offset = 0usize;
+    for (i, &size) in split_sizes.iter().enumerate() {
+        let output_name = &node.output[i];
+
+        // Build slice ranges (full range for all dims except split axis)
+        let slice_ranges: Vec<(Expression, Expression)> = input_dims
+            .iter()
+            .enumerate()
+            .map(|(dim_idx, d)| {
+                if dim_idx == resolved_axis {
+                    (
+                        Expression::from(offset as i32),
+                        Expression::from((offset + size) as i32),
+                    )
+                } else {
+                    (Expression::from(0), d.clone())
+                }
+            })
+            .collect();
+
+        let result = input.slice(slice_ranges);
+        tensors.insert(output_name.clone(), result);
+
+        // Handle constant folding for known inputs (1D case)
+        if let Some(input_vals) = known_values.get(&node.input[0]).cloned() {
+            if ndim == 1 {
+                let folded: Vec<f32> = input_vals[offset..offset + size].to_vec();
+                known_values.insert(output_name.clone(), folded);
+            }
+        }
+
+        offset += size;
     }
 
     Ok(())

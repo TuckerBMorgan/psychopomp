@@ -1,5 +1,5 @@
 use crate::ops_parse::*;
-use crate::runtime::initialize_runtime;
+use crate::runtime::{finalize_cuda, initialize_native, prepare_cuda};
 use crate::utils::*;
 use luminal::prelude::GraphTensor;
 use luminal::prelude::*;
@@ -249,17 +249,21 @@ impl OnnxGraphResult {
         // Track which tensor names are Input nodes (includes those created during process_onnx_nodes)
         let input_tensor_names: HashSet<String> = tensors.keys().cloned().collect();
 
-        // Build and optimize with the selected runtime (native or cuda).
-        // For CudaRuntime, profile() executes the graph during search,
-        // so ALL Input nodes must have buffers before cx.search().
-        let mut rt = initialize_runtime(&mut context, backend)?;
+        // ====================================================================
+        // Runtime initialization - different flows for CUDA vs Native
+        // ====================================================================
+        // CUDA: Two-phase (set data BEFORE search for profiling)
+        //   - CudaRuntime::set_data() doesn't validate, just stores in hlir_buffers
+        //   - hlir_buffers persists across load_llir() calls during profiling
+        // Native: Single-phase (set data AFTER search)
+        //   - NativeRuntime::set_data() validates Input nodes exist in LLIR graph
+        //   - Must search first to load the graph, then set data
 
-        // Step 1: Set dummy zero data for ALL input tensors
-        for (name, gt) in &tensors {
-            if !input_tensor_names.contains(name) {
-                continue;
-            }
-            let n_elements = if let Some(vi) = onnx_graph.input.iter().find(|i| &i.name == name) {
+        let is_cuda = backend == "cuda";
+
+        // Helper to compute n_elements for a tensor
+        let compute_n_elements = |name: &str| -> usize {
+            if let Some(vi) = onnx_graph.input.iter().find(|i| &i.name == name) {
                 let shape = get_shape_for_onnx_value(vi);
                 shape.iter().product::<usize>()
             } else if let Some(init) = onnx_graph.initializer.iter().find(|i| &i.name == name) {
@@ -267,38 +271,94 @@ impl OnnxGraphResult {
             } else if let Some((_, data)) = weight_data.iter().find(|(n, _)| n == name) {
                 data.len()
             } else {
-                continue;
-            };
-            if n_elements > 0 {
-                rt.set_data(gt.id, vec![0.0f32; n_elements]);
+                0
             }
-        }
+        };
 
-        // Step 2: Overwrite with real initializer data (for accurate profiling)
-        for init in &onnx_graph.initializer {
-            let floats = match load_tensor_floats(init, model_directory) {
-                Some(f) => f,
-                None => continue,
-            };
-            if let Some(gt) = tensors.get(&init.name) {
-                rt.set_data(gt.id, floats.clone());
-            }
-            let kn_name = format!("{}_kn", &init.name);
-            if let Some(gt_kn) = tensors.get(&kn_name) {
-                let dims: Vec<usize> = init.dims.iter().map(|&d| d as usize).collect();
-                if dims.len() == 2 {
-                    let transposed = transpose_weight_data(&floats, dims[0], dims[1]);
-                    rt.set_data(gt_kn.id, transposed);
+        let rt = if is_cuda {
+            // CUDA: Two-phase - set data BEFORE search for profiling
+            let (mut cuda_rt, _stream) = prepare_cuda(&mut context)?;
+
+            // Set dummy zero data for ALL input tensors
+            for (name, gt) in &tensors {
+                if !input_tensor_names.contains(name) {
+                    continue;
+                }
+                let n_elements = compute_n_elements(name);
+                if n_elements > 0 {
+                    cuda_rt.set_data(gt.id, vec![0.0f32; n_elements]);
                 }
             }
-        }
 
-        // Step 3: Load constant node data (from Constant, ConstantOfShape, Where masks, etc.)
-        for (name, floats) in &weight_data {
-            if let Some(gt) = tensors.get(name) {
-                rt.set_data(gt.id, floats.clone());
+            // Overwrite with real initializer data (for accurate profiling)
+            for init in &onnx_graph.initializer {
+                let floats = match load_tensor_floats(init, model_directory) {
+                    Some(f) => f,
+                    None => continue,
+                };
+                if let Some(gt) = tensors.get(&init.name) {
+                    cuda_rt.set_data(gt.id, floats.clone());
+                }
+                let kn_name = format!("{}_kn", &init.name);
+                if let Some(gt_kn) = tensors.get(&kn_name) {
+                    let dims: Vec<usize> = init.dims.iter().map(|&d| d as usize).collect();
+                    if dims.len() == 2 {
+                        let transposed = transpose_weight_data(&floats, dims[0], dims[1]);
+                        cuda_rt.set_data(gt_kn.id, transposed);
+                    }
+                }
             }
-        }
+
+            // Load constant node data
+            for (name, floats) in &weight_data {
+                if let Some(gt) = tensors.get(name) {
+                    cuda_rt.set_data(gt.id, floats.clone());
+                }
+            }
+
+            // Now finalize (search with profiling, data is available)
+            finalize_cuda(&mut context, cuda_rt)
+        } else {
+            // Native: Single-phase - search first, then set data
+            let mut rt = initialize_native(&mut context)?;
+
+            // Set dummy zero data ONLY for actual model inputs (not all tensors)
+            // These MUST exist after optimization - they're the inference entry points
+            for name in &input_names {
+                if let Some(gt) = tensors.get(name) {
+                    let n_elements = compute_n_elements(name);
+                    if n_elements > 0 {
+                        rt.set_data(gt.id, vec![0.0f32; n_elements]);
+                    }
+                }
+            }
+
+            // Set initializer data - these MUST exist after optimization (they're weights)
+            // Skip _kn variants - they might be optimized away
+            for init in &onnx_graph.initializer {
+                let floats = match load_tensor_floats(init, model_directory) {
+                    Some(f) => f,
+                    None => continue,
+                };
+                if let Some(gt) = tensors.get(&init.name) {
+                    rt.set_data(gt.id, floats.clone());
+                }
+                // NOTE: Skip _kn transposed variants - might be optimized away
+            }
+
+            // Load constant node data, but skip _kn transposed variants
+            for (name, floats) in &weight_data {
+                // Skip _kn transposed variants - might be optimized away
+                if name.ends_with("_kn") {
+                    continue;
+                }
+                if let Some(gt) = tensors.get(name) {
+                    rt.set_data(gt.id, floats.clone());
+                }
+            }
+
+            rt
+        };
 
         Ok(OnnxGraphResult {
             context,

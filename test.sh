@@ -15,7 +15,7 @@ if [ -n "$VIRTUAL_ENV" ] || [ -n "$CONDA_PREFIX" ] || [ -d ".venv" ]; then
     python3 -m maturin develop
 else
     python3 -m maturin build --release
-    pip3 install --force-reinstall rust_psychopomp/target/wheels/*.whl
+    pip3 install rust_psychopomp/target/wheels/*.whl
 fi
 
 echo ""

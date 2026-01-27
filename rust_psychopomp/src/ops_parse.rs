@@ -209,6 +209,43 @@ pub fn parse_div_node(
     Ok(())
 }
 
+/// Handle Pow node: element-wise power (base^exponent).
+///
+/// Supports broadcasting and constant folding.
+pub fn parse_pow_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    assert!(node.input.len() == 2, "Pow should have exactly 2 inputs");
+    let base = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Pow: missing base tensor '{}'", node.input[0]))?;
+    let exp = *tensors
+        .get(&node.input[1])
+        .ok_or_else(|| format!("Pow: missing exponent tensor '{}'", node.input[1]))?;
+
+    // Broadcast both operands to the same shape
+    let broadcast_shape = compute_broadcast_shape(&base.dims(), &exp.dims());
+    let base_bc = broadcast_to(base, &broadcast_shape);
+    let exp_bc = broadcast_to(exp, &broadcast_shape);
+
+    let result = base_bc.pow(exp_bc);
+    let output_name = &node.output[0];
+    tensors.insert(output_name.clone(), result);
+
+    // Constant folding: if both inputs have known values, compute the result
+    if let (Some(vb), Some(ve)) = (
+        known_values.get(&node.input[0]).cloned(),
+        known_values.get(&node.input[1]).cloned(),
+    ) {
+        let folded = broadcast_binop(&vb, &ve, |b, e| b.powf(e));
+        known_values.insert(output_name.clone(), folded);
+    }
+
+    Ok(())
+}
+
 /// Handle Sqrt node: element-wise square root.
 ///
 /// Supports constant folding when the input has known values.
@@ -228,6 +265,78 @@ pub fn parse_sqrt_node(
 
     if let Some(vals) = known_values.get(&node.input[0]).cloned() {
         let folded: Vec<f32> = vals.iter().map(|&v| v.sqrt()).collect();
+        known_values.insert(output_name.clone(), folded);
+    }
+    Ok(())
+}
+
+/// Handle Cos node: element-wise cosine.
+///
+/// Supports constant folding when the input has known values.
+pub fn parse_cos_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    assert!(node.input.len() == 1, "Cos should have exactly 1 input");
+    let input = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Cos: missing input tensor '{}'", node.input[0]))?;
+
+    let result = input.cos();
+    let output_name = &node.output[0];
+    tensors.insert(output_name.clone(), result);
+
+    if let Some(vals) = known_values.get(&node.input[0]).cloned() {
+        let folded: Vec<f32> = vals.iter().map(|&v| v.cos()).collect();
+        known_values.insert(output_name.clone(), folded);
+    }
+    Ok(())
+}
+
+/// Handle Sin node: element-wise sine.
+///
+/// Supports constant folding when the input has known values.
+pub fn parse_sin_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    assert!(node.input.len() == 1, "Sin should have exactly 1 input");
+    let input = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Sin: missing input tensor '{}'", node.input[0]))?;
+
+    let result = input.sin();
+    let output_name = &node.output[0];
+    tensors.insert(output_name.clone(), result);
+
+    if let Some(vals) = known_values.get(&node.input[0]).cloned() {
+        let folded: Vec<f32> = vals.iter().map(|&v| v.sin()).collect();
+        known_values.insert(output_name.clone(), folded);
+    }
+    Ok(())
+}
+
+/// Handle Neg node: element-wise negation.
+///
+/// Supports constant folding when the input has known values.
+pub fn parse_neg_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    assert!(node.input.len() == 1, "Neg should have exactly 1 input");
+    let input = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Neg: missing input tensor '{}'", node.input[0]))?;
+
+    let result = -input;
+    let output_name = &node.output[0];
+    tensors.insert(output_name.clone(), result);
+
+    if let Some(vals) = known_values.get(&node.input[0]).cloned() {
+        let folded: Vec<f32> = vals.iter().map(|&v| -v).collect();
         known_values.insert(output_name.clone(), folded);
     }
     Ok(())
@@ -381,6 +490,73 @@ pub fn parse_softmax_node(
     Ok(())
 }
 
+/// Handle ReduceMean node: compute mean along specified axes.
+///
+/// Supports both opset 18+ (axes as input) and older (axes as attribute).
+/// keepdims attribute controls whether reduced dimensions are kept as size 1.
+pub fn parse_reduce_mean_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    let input = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("ReduceMean: missing input tensor '{}'", node.input[0]))?;
+
+    let ndim = input.dims().len();
+    let keepdims = get_int_attr(node, "keepdims", 1) != 0;
+
+    // Get axes: from second input (opset 18+) or attribute (older)
+    let axes: Vec<usize> = if node.input.len() > 1 && !node.input[1].is_empty() {
+        let axes_data = known_values
+            .get(&node.input[1])
+            .ok_or_else(|| format!("ReduceMean: axes '{}' must be known", node.input[1]))?;
+        axes_data
+            .iter()
+            .map(|&v| {
+                let a = v as i64;
+                if a < 0 {
+                    (ndim as i64 + a) as usize
+                } else {
+                    a as usize
+                }
+            })
+            .collect()
+    } else if let Some(attr) = node.attribute.iter().find(|a| a.name == "axes") {
+        attr.ints
+            .iter()
+            .map(|&v| {
+                if v < 0 {
+                    (ndim as i64 + v) as usize
+                } else {
+                    v as usize
+                }
+            })
+            .collect()
+    } else {
+        // No axes: reduce all dimensions
+        (0..ndim).collect()
+    };
+
+    let result = input.mean(axes.clone());
+
+    // Handle keepdims by expanding back to original shape
+    let output = if keepdims {
+        let input_shape: Vec<usize> = input
+            .dims()
+            .iter()
+            .map(|e| e.to_usize().unwrap())
+            .collect();
+        result.expand_to_shape_on_axes(input_shape, axes)
+    } else {
+        result
+    };
+
+    let output_name = &node.output[0];
+    tensors.insert(output_name.clone(), output);
+    Ok(())
+}
+
 /// Handle Erf node: approximate the error function using a sigmoid-based formula.
 ///
 /// erf(x) ≈ 2*sigmoid(2.2567583342 * x * (1 + 0.0885*x²)) - 1
@@ -494,6 +670,67 @@ pub fn parse_erf_node(
     weight_data.push((neg_one2_name, vec![-1.0f32]));
     let neg_one2_bc = broadcast_to(neg_one2, &input_shape);
     let result = two_sigmoid.add(neg_one2_bc);
+
+    tensors.insert(output_name.clone(), result);
+    Ok(())
+}
+
+/// Handle Sigmoid node: logistic sigmoid activation.
+///
+/// sigmoid(x) = 1 / (1 + exp(-x))
+/// Uses exp2 with log2(e) scaling: exp(z) = exp2(z * log2(e))
+pub fn parse_sigmoid_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    cx: &mut Graph,
+    weight_data: &mut Vec<(String, Vec<f32>)>,
+) -> Result<(), String> {
+    assert!(node.input.len() == 1, "Sigmoid should have exactly 1 input");
+    let input = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Sigmoid: missing input tensor '{}'", node.input[0]))?;
+
+    let output_name = &node.output[0];
+    let input_shape: Vec<usize> = input.dims().iter().map(|e| e.to_usize().unwrap()).collect();
+
+    // Create named tensors for constants
+    // One = 1.0
+    let one_name = format!("{}_sigmoid_one", output_name);
+    let one = cx.named_tensor(one_name.clone(), vec![1usize]);
+    tensors.insert(one_name.clone(), one);
+    weight_data.push((one_name, vec![1.0f32]));
+    let one_bc = broadcast_to(one, &input_shape);
+
+    // Negative one = -1.0 (for computing -x)
+    let neg_one_name = format!("{}_sigmoid_neg_one", output_name);
+    let neg_one = cx.named_tensor(neg_one_name.clone(), vec![1usize]);
+    tensors.insert(neg_one_name.clone(), neg_one);
+    weight_data.push((neg_one_name, vec![-1.0f32]));
+    let neg_one_bc = broadcast_to(neg_one, &input_shape);
+
+    // log2(e) for exp2 conversion: exp(z) = exp2(z * log2(e))
+    let log2e_name = format!("{}_sigmoid_log2e", output_name);
+    let log2e = cx.named_tensor(log2e_name.clone(), vec![1usize]);
+    tensors.insert(log2e_name.clone(), log2e);
+    weight_data.push((log2e_name, vec![1.0f32 / 2.0f32.ln()]));
+    let log2e_bc = broadcast_to(log2e, &input_shape);
+
+    // sigmoid(x) = 1 / (1 + exp(-x))
+
+    // Step 1: -x = input * (-1)
+    let neg_x = input.mul(neg_one_bc);
+
+    // Step 2: -x * log2(e) (for exp2)
+    let scaled = neg_x.mul(log2e_bc);
+
+    // Step 3: exp(-x) = exp2(scaled)
+    let exp_neg_x = scaled.exp2();
+
+    // Step 4: 1 + exp(-x)
+    let one_plus_exp = one_bc.add(exp_neg_x);
+
+    // Step 5: sigmoid = 1 / (1 + exp(-x))
+    let result = one_plus_exp.reciprocal();
 
     tensors.insert(output_name.clone(), result);
     Ok(())
@@ -968,6 +1205,47 @@ pub fn parse_equal_node(
         known_values.get(&node.input[1]).cloned(),
     ) {
         let folded = broadcast_binop(&va, &vb, |a, b| if a == b { 1.0 } else { 0.0 });
+        known_values.insert(output_name.clone(), folded);
+    }
+
+    Ok(())
+}
+
+/// Parse LessOrEqual node (ONNX element-wise less-than-or-equal comparison).
+///
+/// Outputs 1.0 where a <= b, 0.0 otherwise. Supports broadcasting
+/// and constant folding.
+pub fn parse_less_or_equal_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    assert!(node.input.len() == 2, "LessOrEqual should have 2 inputs");
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("LessOrEqual: missing input tensor '{}'", node.input[0]))?;
+    let b = *tensors
+        .get(&node.input[1])
+        .ok_or_else(|| format!("LessOrEqual: missing input tensor '{}'", node.input[1]))?;
+
+    // Broadcast both operands to the same shape
+    let broadcast_shape = compute_broadcast_shape(&a.dims(), &b.dims());
+    let a_bc = broadcast_to(a, &broadcast_shape);
+    let b_bc = broadcast_to(b, &broadcast_shape);
+
+    // LessOrEqual: a <= b is equivalent to NOT(b < a), i.e., 1.0 - b.lt(a)
+    let one = a_bc.graph().constant_float(1.0).expand_rhs(a_bc.shape);
+    let result = one - b_bc.lt(a_bc);
+
+    let output_name = &node.output[0];
+    tensors.insert(output_name.clone(), result);
+
+    // Constant folding: if both inputs have known values, compute the result
+    if let (Some(va), Some(vb)) = (
+        known_values.get(&node.input[0]).cloned(),
+        known_values.get(&node.input[1]).cloned(),
+    ) {
+        let folded = broadcast_binop(&va, &vb, |a, b| if a <= b { 1.0 } else { 0.0 });
         known_values.insert(output_name.clone(), folded);
     }
 

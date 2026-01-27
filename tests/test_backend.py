@@ -485,6 +485,238 @@ class CastModel(nn.Module):
         return x_int.float()
 
 
+# --- Trilu (Triangular) Models ---
+
+
+class TriluUpperModel(nn.Module):
+    """Extract upper triangular part of matrix."""
+
+    def __init__(self, size):
+        super().__init__()
+        self.size = size
+        self.linear = nn.Linear(size, size)
+
+    def forward(self, x):
+        x = self.linear(x)
+        # Reshape to square matrix for triu
+        batch = x.shape[0]
+        x = x.view(batch, int(self.size**0.5), int(self.size**0.5))
+        return torch.triu(x)
+
+
+class TriluLowerModel(nn.Module):
+    """Extract lower triangular part of matrix."""
+
+    def __init__(self, size):
+        super().__init__()
+        self.size = size
+
+    def forward(self, x):
+        return torch.tril(x)
+
+
+class TriluDiagonalOffsetModel(nn.Module):
+    """Trilu with diagonal offset k."""
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        # k=1 means one diagonal above main
+        return torch.triu(x, diagonal=1)
+
+
+# --- Where (Conditional) Models ---
+
+
+class WhereEqualModel(nn.Module):
+    """Where with Equal condition (selecting based on zero elements)."""
+
+    def __init__(self, features):
+        super().__init__()
+        self.features = features
+        self.register_buffer("zero", torch.tensor([0.0]))
+
+    def forward(self, x):
+        # Condition: where x equals 0, use replacement value
+        condition = x == self.zero
+        replacement = torch.ones_like(x) * -1.0
+        return torch.where(condition, replacement, x)
+
+
+class WhereBroadcastModel(nn.Module):
+    """Where with broadcasting boolean mask."""
+
+    def __init__(self, features):
+        super().__init__()
+        self.features = features
+        # Create a mask that broadcasts
+        self.register_buffer("mask", torch.tensor([True, False] * (features // 2)))
+        # Alternative value (not using Neg since it's unsupported)
+        self.register_buffer("alt_value", torch.zeros(features))
+
+    def forward(self, x):
+        # mask: (features,) broadcasts to (batch, features)
+        return torch.where(self.mask, x, self.alt_value)
+
+
+class WhereTwoTensorModel(nn.Module):
+    """Where selecting between two tensors based on Equal condition."""
+
+    def __init__(self, features):
+        super().__init__()
+        self.linear_a = nn.Linear(features, features)
+        self.linear_b = nn.Linear(features, features)
+        self.register_buffer("zero", torch.tensor([0.0]))
+
+    def forward(self, x):
+        a = self.linear_a(x)
+        b = self.linear_b(x)
+        # Condition based on Equal
+        condition = x == self.zero
+        return torch.where(condition, a, b)
+
+
+# --- ConstantOfShape Models ---
+
+
+class ConstantOfShapeZerosModel(nn.Module):
+    """Creates zeros tensor with computed shape."""
+
+    def __init__(self, features):
+        super().__init__()
+        self.features = features
+
+    def forward(self, x):
+        batch = x.shape[0]
+        # Create zeros and add to input (tests ConstantOfShape with value=0)
+        zeros = torch.zeros(batch, self.features, device=x.device, dtype=x.dtype)
+        return x + zeros
+
+
+class ConstantOfShapeOnesModel(nn.Module):
+    """Creates ones tensor and multiplies."""
+
+    def __init__(self, features):
+        super().__init__()
+        self.features = features
+
+    def forward(self, x):
+        batch = x.shape[0]
+        # Create ones and multiply (tests ConstantOfShape with value=1)
+        ones = torch.ones(batch, self.features, device=x.device, dtype=x.dtype)
+        return x * ones
+
+
+class ConstantOfShapeFullModel(nn.Module):
+    """Creates tensor filled with arbitrary constant."""
+
+    def __init__(self, features, fill_value):
+        super().__init__()
+        self.features = features
+        self.fill_value = fill_value
+
+    def forward(self, x):
+        batch = x.shape[0]
+        # Create filled tensor (tests ConstantOfShape with custom value)
+        filled = torch.full(
+            (batch, self.features), self.fill_value, device=x.device, dtype=x.dtype
+        )
+        return x + filled
+
+
+# --- Shape-based Model ---
+
+
+class ShapeBasedReshapeModel(nn.Module):
+    """Model that uses tensor shape for reshaping."""
+
+    def __init__(self, features):
+        super().__init__()
+        self.linear = nn.Linear(features, features * 2)
+
+    def forward(self, x):
+        # Uses shape internally: reshape to (batch, 2, features)
+        batch_size = x.shape[0]
+        x = self.linear(x)
+        return x.view(batch_size, 2, -1)
+
+
+# --- Gather Edge Case Models ---
+
+
+class GatherLargeVocabModel(nn.Module):
+    """Gather with large vocabulary (tests index precision)."""
+
+    def __init__(self, vocab_size, embedding_dim):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embedding_dim)
+
+    def forward(self, indices):
+        return self.embedding(indices)
+
+
+# --- Expand Edge Case Models ---
+
+
+class ExpandMultiDimModel(nn.Module):
+    """Expand tensor across multiple dimensions."""
+
+    def __init__(self, features):
+        super().__init__()
+        # Scalar-like parameter that expands to full tensor
+        self.scale = nn.Parameter(torch.randn(1))
+
+    def forward(self, x):
+        # scale: (1,) expands to x's shape (batch, seq, features)
+        return x * self.scale
+
+
+class ExpandPrependDimsModel(nn.Module):
+    """Expand by prepending dimensions."""
+
+    def __init__(self, features):
+        super().__init__()
+        self.bias = nn.Parameter(torch.randn(features))
+
+    def forward(self, x):
+        # bias: (features,) needs batch and seq dims prepended
+        # x: (batch, seq, features)
+        return x + self.bias
+
+
+# --- Split Edge Case Models ---
+
+
+class SplitBatchDimModel(nn.Module):
+    """Split along axis 0 (batch dimension)."""
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        # Split batch in half
+        splits = torch.split(x, x.shape[0] // 2, dim=0)
+        return splits[0] + splits[1]
+
+
+class SplitMultipleChunksModel(nn.Module):
+    """Split into 3 chunks and concatenate first two."""
+
+    def __init__(self, in_features):
+        super().__init__()
+        self.linear = nn.Linear(in_features, in_features)
+        # in_features should be divisible by 3
+
+    def forward(self, x):
+        x = self.linear(x)
+        # Split into 3 equal chunks
+        chunk_size = x.shape[-1] // 3
+        chunks = torch.split(x, chunk_size, dim=-1)
+        # Concatenate first two chunks
+        return torch.cat([chunks[0], chunks[1]], dim=-1)
+
+
 def check(name, result, expected, tol):
     """Compare result vs expected and assert within tolerance."""
     diff = (result - expected).abs().max().item()
@@ -956,6 +1188,230 @@ def test_llama():
     check("test_llama", result, expected, tol=1e-5)
 
 
+# --- Trilu Tests ---
+
+
+def test_trilu_upper():
+    """Test Trilu upper triangular extraction."""
+    print("=== Test: Trilu (Upper) ===")
+    model = TriluUpperModel(size=16)
+    model.eval()
+    x = torch.randn(2, 16)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_trilu_upper", result, expected, tol=1e-5)
+
+
+def test_trilu_lower():
+    """Test Trilu lower triangular extraction."""
+    print("=== Test: Trilu (Lower) ===")
+    model = TriluLowerModel(size=8)
+    model.eval()
+    x = torch.randn(4, 8, 8)  # 3D with square last two dims
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_trilu_lower", result, expected, tol=1e-5)
+
+
+def test_trilu_diagonal_offset():
+    """Test Trilu with diagonal offset."""
+    print("=== Test: Trilu (Diagonal Offset) ===")
+    model = TriluDiagonalOffsetModel()
+    model.eval()
+    x = torch.randn(2, 6, 6)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_trilu_diagonal_offset", result, expected, tol=1e-5)
+
+
+# --- Where Tests ---
+
+
+def test_where_equal():
+    """Test Where with Equal condition."""
+    print("=== Test: Where (Equal) ===")
+    model = WhereEqualModel(features=16)
+    model.eval()
+    # Use tensor with some zeros to trigger the condition
+    x = torch.tensor([[0.0, 1.0, 0.0, 2.0, 0.0, 3.0, 0.0, 4.0,
+                       0.0, 5.0, 0.0, 6.0, 0.0, 7.0, 0.0, 8.0]])
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_where_equal", result, expected, tol=1e-5)
+
+
+def test_where_broadcast():
+    """Test Where with broadcasting condition."""
+    print("=== Test: Where (Broadcast) ===")
+    model = WhereBroadcastModel(features=16)
+    model.eval()
+    x = torch.randn(4, 16)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_where_broadcast", result, expected, tol=1e-5)
+
+
+def test_where_two_tensors():
+    """Test Where selecting between two computed tensors."""
+    print("=== Test: Where (Two Tensors) ===")
+    model = WhereTwoTensorModel(features=16)
+    model.eval()
+    # Use tensor with some zeros to trigger the condition
+    x = torch.tensor([[0.0, 1.0, 0.0, 2.0, 0.0, 3.0, 0.0, 4.0,
+                       0.0, 5.0, 0.0, 6.0, 0.0, 7.0, 0.0, 8.0],
+                      [1.0, 0.0, 2.0, 0.0, 3.0, 0.0, 4.0, 0.0,
+                       5.0, 0.0, 6.0, 0.0, 7.0, 0.0, 8.0, 0.0]])
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_where_two_tensors", result, expected, tol=1e-5)
+
+
+# --- ConstantOfShape Tests ---
+
+
+def test_constant_of_shape_zeros():
+    """Test ConstantOfShape with zeros."""
+    print("=== Test: ConstantOfShape (Zeros) ===")
+    model = ConstantOfShapeZerosModel(features=16)
+    model.eval()
+    x = torch.randn(4, 16)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_constant_of_shape_zeros", result, expected, tol=1e-5)
+
+
+def test_constant_of_shape_ones():
+    """Test ConstantOfShape with ones."""
+    print("=== Test: ConstantOfShape (Ones) ===")
+    model = ConstantOfShapeOnesModel(features=16)
+    model.eval()
+    x = torch.randn(4, 16)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_constant_of_shape_ones", result, expected, tol=1e-5)
+
+
+def test_constant_of_shape_full():
+    """Test ConstantOfShape with custom fill value."""
+    print("=== Test: ConstantOfShape (Full) ===")
+    model = ConstantOfShapeFullModel(features=16, fill_value=0.5)
+    model.eval()
+    x = torch.randn(4, 16)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_constant_of_shape_full", result, expected, tol=1e-5)
+
+
+# --- Shape Test ---
+
+
+def test_shape_based_reshape():
+    """Test Shape operation via reshape with dynamic batch."""
+    print("=== Test: Shape (via Reshape) ===")
+    model = ShapeBasedReshapeModel(features=16)
+    model.eval()
+    x = torch.randn(4, 16)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_shape_based_reshape", result, expected, tol=1e-5)
+
+
+# --- Gather Edge Case Tests ---
+
+
+def test_gather_large_vocab():
+    """Test Gather with large vocabulary (tests index precision)."""
+    print("=== Test: Gather (Large Vocab) ===")
+    vocab_size = 50304  # GPT-2 vocab size
+    model = GatherLargeVocabModel(vocab_size=vocab_size, embedding_dim=32)
+    model.eval()
+    # Include indices near the end of vocab to stress precision
+    indices = torch.randint(0, vocab_size, (2, 16))
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(indices)
+    with torch.no_grad():
+        expected = model(indices)
+    check("test_gather_large_vocab", result, expected, tol=1e-5)
+
+
+# --- Expand Edge Case Tests ---
+
+
+def test_expand_multi_dim():
+    """Test Expand across multiple dimensions."""
+    print("=== Test: Expand (Multi-dim) ===")
+    model = ExpandMultiDimModel(features=16)
+    model.eval()
+    x = torch.randn(2, 8, 16)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_expand_multi_dim", result, expected, tol=1e-5)
+
+
+def test_expand_prepend_dims():
+    """Test Expand with prepended dimensions."""
+    print("=== Test: Expand (Prepend Dims) ===")
+    model = ExpandPrependDimsModel(features=16)
+    model.eval()
+    x = torch.randn(2, 8, 16)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_expand_prepend_dims", result, expected, tol=1e-5)
+
+
+# --- Split Edge Case Tests ---
+
+
+def test_split_batch_dim():
+    """Test Split along batch dimension."""
+    print("=== Test: Split (Batch Dim) ===")
+    model = SplitBatchDimModel()
+    model.eval()
+    x = torch.randn(4, 16)  # 4 batches, split into 2+2
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_split_batch_dim", result, expected, tol=1e-5)
+
+
+def test_split_multiple_chunks():
+    """Test Split into multiple chunks."""
+    print("=== Test: Split (Multiple Chunks) ===")
+    model = SplitMultipleChunksModel(in_features=24)
+    model.eval()
+    x = torch.randn(4, 24)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_split_multiple_chunks", result, expected, tol=1e-5)
+
+
 def test_nanogpt():
     """Test Nanogpt."""
     print("=== Test: NanoGpt ===")
@@ -1033,6 +1489,28 @@ def main():
         test_equal,
         test_mod,
         test_cast,
+        # Trilu tests
+        test_trilu_upper,
+        test_trilu_lower,
+        test_trilu_diagonal_offset,
+        # Where tests
+        test_where_equal,
+        test_where_broadcast,
+        test_where_two_tensors,
+        # ConstantOfShape tests
+        test_constant_of_shape_zeros,
+        test_constant_of_shape_ones,
+        test_constant_of_shape_full,
+        # Shape test
+        test_shape_based_reshape,
+        # Gather edge cases
+        test_gather_large_vocab,
+        # Expand edge cases
+        test_expand_multi_dim,
+        test_expand_prepend_dims,
+        # Split edge cases
+        test_split_batch_dim,
+        test_split_multiple_chunks,
     ]
 
     passed = 0

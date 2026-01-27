@@ -1,8 +1,14 @@
 """Tests for the psychopomp torch.compile backend."""
 
+import os
+
 import psychopomp
 import torch
 from torch import nn
+
+# Backend selection via environment variable
+# Default: "psychopomp" (native), can be set to "psychopomp_cuda" for CUDA testing
+BACKEND = os.environ.get("PSYCHOPOMP_BACKEND", "psychopomp")
 
 
 class BasicTransformerLM(nn.Module):
@@ -272,7 +278,7 @@ def test_simple_linear():
     model = SimpleModel()
     model.eval()
     x = torch.randn(2, 10)
-    compiled = torch.compile(model, backend="psychopomp")
+    compiled = torch.compile(model, backend=BACKEND)
     result = compiled(x)
     with torch.no_grad():
         expected = model(x)
@@ -285,7 +291,7 @@ def test_elementwise_mul_div():
     model = MulDivModel(features=16)
     model.eval()
     x = torch.randn(4, 16)
-    compiled = torch.compile(model, backend="psychopomp")
+    compiled = torch.compile(model, backend=BACKEND)
     result = compiled(x)
     with torch.no_grad():
         expected = model(x)
@@ -298,7 +304,7 @@ def test_sqrt_div_model():
     model = SqrtDivModel(features=16)
     model.eval()
     x = torch.randn(4, 16)
-    compiled = torch.compile(model, backend="psychopomp")
+    compiled = torch.compile(model, backend=BACKEND)
     result = compiled(x)
     with torch.no_grad():
         expected = model(x)
@@ -311,7 +317,7 @@ def test_softmax_standalone():
     model = SoftmaxModel(in_features=16, out_features=8)
     model.eval()
     x = torch.randn(4, 16)
-    compiled = torch.compile(model, backend="psychopomp")
+    compiled = torch.compile(model, backend=BACKEND)
     result = compiled(x)
     with torch.no_grad():
         expected = model(x)
@@ -324,7 +330,7 @@ def test_layer_norm_standalone():
     model = LayerNormModel(features=32)
     model.eval()
     x = torch.randn(4, 32)
-    compiled = torch.compile(model, backend="psychopomp")
+    compiled = torch.compile(model, backend=BACKEND)
     result = compiled(x)
     with torch.no_grad():
         expected = model(x)
@@ -337,7 +343,7 @@ def test_erf_standalone():
     model = ErfModel(in_features=16, out_features=8)
     model.eval()
     x = torch.randn(4, 16)
-    compiled = torch.compile(model, backend="psychopomp")
+    compiled = torch.compile(model, backend=BACKEND)
     result = compiled(x)
     with torch.no_grad():
         expected = model(x)
@@ -350,7 +356,7 @@ def test_gelu_activation():
     model = GeluModel(in_features=16, out_features=32)
     model.eval()
     x = torch.randn(4, 16)
-    compiled = torch.compile(model, backend="psychopomp")
+    compiled = torch.compile(model, backend=BACKEND)
     result = compiled(x)
     with torch.no_grad():
         expected = model(x)
@@ -363,7 +369,7 @@ def test_concat_model():
     model = ConcatModel(in_features=16, hidden=8)
     model.eval()
     x = torch.randn(4, 16)
-    compiled = torch.compile(model, backend="psychopomp")
+    compiled = torch.compile(model, backend=BACKEND)
     result = compiled(x)
     with torch.no_grad():
         expected = model(x)
@@ -376,7 +382,7 @@ def test_slice_model():
     model = SliceModel(in_features=16, out_features=6)
     model.eval()
     x = torch.randn(4, 16)
-    compiled = torch.compile(model, backend="psychopomp")
+    compiled = torch.compile(model, backend=BACKEND)
     result = compiled(x)
     with torch.no_grad():
         expected = model(x)
@@ -389,7 +395,7 @@ def test_concat_slice_roundtrip():
     model = ConcatSliceModel(features=16, hidden=12)
     model.eval()
     x = torch.randn(4, 16)
-    compiled = torch.compile(model, backend="psychopomp")
+    compiled = torch.compile(model, backend=BACKEND)
     result = compiled(x)
     with torch.no_grad():
         expected = model(x)
@@ -402,7 +408,7 @@ def test_residual_block():
     model = ResidualBlock(features=32)
     model.eval()
     x = torch.randn(4, 32)
-    compiled = torch.compile(model, backend="psychopomp")
+    compiled = torch.compile(model, backend=BACKEND)
     result = compiled(x)
     with torch.no_grad():
         expected = model(x)
@@ -415,7 +421,7 @@ def test_matmul_transpose_attention():
     model = SimpleAttention(d_model=32)
     model.eval()
     x = torch.randn(2, 8, 32)
-    compiled = torch.compile(model, backend="psychopomp")
+    compiled = torch.compile(model, backend=BACKEND)
     result = compiled(x)
     with torch.no_grad():
         expected = model(x)
@@ -428,7 +434,7 @@ def test_multi_layer_mlp():
     model = MultiLayerMLP(in_features=16, hidden=32, out_features=8)
     model.eval()
     x = torch.randn(4, 16)
-    compiled = torch.compile(model, backend="psychopomp")
+    compiled = torch.compile(model, backend=BACKEND)
     result = compiled(x)
     with torch.no_grad():
         expected = model(x)
@@ -444,7 +450,7 @@ def test_simple_transfomer():
     )
     model.eval()
     x = torch.randint(0, vocab_size, (2, 32))  # (batch=2, seq=32)
-    compiled = torch.compile(model, backend="psychopomp")
+    compiled = torch.compile(model, backend=BACKEND)
     result = compiled(x)
     with torch.no_grad():
         expected = model(x)
@@ -452,6 +458,10 @@ def test_simple_transfomer():
 
 
 def main():
+    print(f"Running tests with backend: {BACKEND}")
+    print("=" * 50)
+    print()
+
     tests = [
         test_simple_linear,
         test_elementwise_mul_div,

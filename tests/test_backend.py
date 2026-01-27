@@ -273,6 +273,75 @@ class TanhModel(nn.Module):
         return torch.tanh(self.linear(x))
 
 
+class CosModel(nn.Module):
+    """Cos activation applied to linear output."""
+
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features)
+
+    def forward(self, x):
+        return torch.cos(self.linear(x))
+
+
+class SinModel(nn.Module):
+    """Sin activation applied to linear output."""
+
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features)
+
+    def forward(self, x):
+        return torch.sin(self.linear(x))
+
+
+class PowModel(nn.Module):
+    """Pow operation: base raised to exponent power."""
+
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features)
+
+    def forward(self, x):
+        # Use abs to avoid NaN from negative bases with fractional exponents
+        base = torch.abs(self.linear(x)) + 0.1
+        return torch.pow(base, 2.0)
+
+
+class ReduceMeanModel(nn.Module):
+    """ReduceMean along last dimension."""
+
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features)
+
+    def forward(self, x):
+        x = self.linear(x)
+        return torch.mean(x, dim=-1, keepdim=True)
+
+
+class NegModel(nn.Module):
+    """Negation applied to linear output."""
+
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features)
+
+    def forward(self, x):
+        return torch.neg(self.linear(x))
+
+
+class SigmoidModel(nn.Module):
+    """Sigmoid activation applied to linear output."""
+
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features)
+
+    def forward(self, x):
+        return torch.sigmoid(self.linear(x))
+
+
 class SplitEqualModel(nn.Module):
     """Split tensor into equal parts along feature dimension."""
 
@@ -379,8 +448,6 @@ class SqueezeModel(nn.Module):
         x = self.linear(x)
         # (batch, 1, features) -> (batch, features)
         return x.squeeze(1)
-
-
 
 
 class EqualModel(nn.Module):
@@ -633,6 +700,84 @@ def test_tanh_standalone():
     check("test_tanh_standalone", result, expected, tol=1e-4)
 
 
+def test_cos_standalone():
+    """Test torch.cos function."""
+    print("=== Test: Cos ===")
+    model = CosModel(in_features=16, out_features=8)
+    model.eval()
+    x = torch.randn(4, 16)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_cos_standalone", result, expected, tol=1e-4)
+
+
+def test_sin_standalone():
+    """Test torch.sin function."""
+    print("=== Test: Sin ===")
+    model = SinModel(in_features=16, out_features=8)
+    model.eval()
+    x = torch.randn(4, 16)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_sin_standalone", result, expected, tol=1e-4)
+
+
+def test_pow_standalone():
+    """Test torch.pow function."""
+    print("=== Test: Pow ===")
+    model = PowModel(in_features=16, out_features=8)
+    model.eval()
+    x = torch.randn(4, 16)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_pow_standalone", result, expected, tol=1e-4)
+
+
+def test_reduce_mean_standalone():
+    """Test torch.mean reduction."""
+    print("=== Test: ReduceMean ===")
+    model = ReduceMeanModel(in_features=16, out_features=8)
+    model.eval()
+    x = torch.randn(4, 16)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_reduce_mean_standalone", result, expected, tol=1e-4)
+
+
+def test_neg_standalone():
+    """Test torch.neg function."""
+    print("=== Test: Neg ===")
+    model = NegModel(in_features=16, out_features=8)
+    model.eval()
+    x = torch.randn(4, 16)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_neg_standalone", result, expected, tol=1e-5)
+
+
+def test_sigmoid_standalone():
+    """Test torch.sigmoid function."""
+    print("=== Test: Sigmoid ===")
+    model = SigmoidModel(in_features=16, out_features=8)
+    model.eval()
+    x = torch.randn(4, 16)
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_sigmoid_standalone", result, expected, tol=1e-4)
+
+
 def test_split_equal():
     """Test Split with equal division."""
     print("=== Test: Split (Equal) ===")
@@ -776,6 +921,41 @@ def test_cast():
     check("test_cast", result, expected, tol=1e-5)
 
 
+def test_llama():
+    """Test Llama."""
+    print("=== Test: LLama ===")
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    config = LlamaConfig(
+        vocab_size=128256,  # Llama 3 tokenizer vocab
+        hidden_size=4096,
+        intermediate_size=14336,
+        num_hidden_layers=32,
+        num_attention_heads=32,
+        num_key_value_heads=8,  # GQA (grouped-query attention)
+        max_position_embeddings=8192,
+        rms_norm_eps=1e-5,
+    )
+
+    model = LlamaForCausalLM(config)
+    model.eval()
+    batch_size = 2
+    seq_len = 128
+
+    x = torch.randint(
+        low=0,
+        high=config.vocab_size,
+        size=(batch_size, seq_len),
+        dtype=torch.long,
+    )
+
+    compiled = torch.compile(model, backend=BACKEND)
+    result = compiled(x)
+    with torch.no_grad():
+        expected = model(x)
+    check("test_llama", result, expected, tol=1e-5)
+
+
 def test_nanogpt():
     """Test Nanogpt."""
     print("=== Test: NanoGpt ===")
@@ -818,6 +998,7 @@ def main():
     print()
 
     tests = [
+        test_llama,
         test_nanogpt,
         test_simple_linear,
         test_elementwise_mul_div,
@@ -835,6 +1016,12 @@ def main():
         test_simple_transfomer,
         # New ONNX op tests
         test_tanh_standalone,
+        test_cos_standalone,
+        test_sin_standalone,
+        test_pow_standalone,
+        test_reduce_mean_standalone,
+        test_neg_standalone,
+        test_sigmoid_standalone,
         test_split_equal,
         test_split_unequal,
         test_gather_embedding,

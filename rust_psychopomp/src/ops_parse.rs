@@ -2472,9 +2472,12 @@ pub fn parse_split_node(
             .enumerate()
             .map(|(dim_idx, d)| {
                 if dim_idx == resolved_axis {
+                    // Clamp to i32 range (luminal Expression limitation)
+                    let start_i32 = (offset as i64).min(i32::MAX as i64) as i32;
+                    let end_i32 = ((offset + size) as i64).min(i32::MAX as i64) as i32;
                     (
-                        Expression::from(offset as i32),
-                        Expression::from((offset + size) as i32),
+                        Expression::from(start_i32),
+                        Expression::from(end_i32),
                     )
                 } else {
                     (Expression::from(0), d.clone())

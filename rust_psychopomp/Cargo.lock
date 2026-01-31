@@ -898,7 +898,7 @@ dependencies = [
 [[package]]
 name = "luminal"
 version = "0.2.0"
-source = "git+https://github.com/TuckerBMorgan/luminal.git#37af6a182234582ceb6c2680be25b2f90ca829b2"
+source = "git+https://github.com/TuckerBMorgan/luminal.git#68de38711b047af2a7f7e6497da8b2edf08d0e01"
 dependencies = [
  "anyhow",
  "as-any",
@@ -929,7 +929,7 @@ dependencies = [
 [[package]]
 name = "luminal_cuda"
 version = "0.2.0"
-source = "git+https://github.com/TuckerBMorgan/luminal.git#37af6a182234582ceb6c2680be25b2f90ca829b2"
+source = "git+https://github.com/TuckerBMorgan/luminal.git#68de38711b047af2a7f7e6497da8b2edf08d0e01"
 dependencies = [
  "as-any",
  "bytemuck",
@@ -1258,7 +1258,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "343d3bd7056eda839b03204e68deff7d1b13aba7af2b2fd16890697274262ee7"
 dependencies = [
  "heck",
- "itertools 0.11.0",
+ "itertools 0.12.1",
  "log",
  "multimap",
  "petgraph 0.8.3",
@@ -1277,7 +1277,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.11.0",
+ "itertools 0.12.1",
  "proc-macro2",
  "quote",
  "syn 2.0.114",
